@@ -1,890 +1,972 @@
-// AWS SSO Page Enhancer Bookmarklet
-// Adds filtering, favorites, and UI enhancements to the AWS SSO account selection page
+// AWS SSO Enhancer - Complete UI Replacement
+// Compact, filterable, favorites-first interface
 
 (function() {
   'use strict';
 
-  // Prevent double-initialization
   if (window.__awsSsoEnhancer) {
     console.log('AWS SSO Enhancer already running');
-    window.__awsSsoEnhancer.toggle();
     return;
   }
 
-  const STORAGE_KEY = 'awsSsoEnhancer_favorites';
-  const EXPANDED_KEY = 'awsSsoEnhancer_expanded';
-  
-  // State
-  let favorites = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'));
-  let isExpanding = false;
-  let panel = null;
-  let accountFilter = '';
-  let roleFilter = '';
-  let showFavoritesOnly = false;
+  // ========== STATE ==========
+  const STORAGE_KEY = 'awsSsoEnhancer_v2';
+  const USAGE_KEY = 'awsSsoEnhancer_usage';
+  let state = {
+    favoriteAccounts: new Set(),
+    favoriteRoles: new Set(),
+    favoriteCombos: new Set(),
+    accountFilter: '',
+    roleFilter: '',
+    showFavoritesOnly: false,
+    accounts: [],
+    isLoading: false,
+    loadingProgress: { current: 0, total: 0 },
+    currentDelay: 100,
+    consecutiveErrors: 0
+  };
+  // Usage tracking: { "accountId:roleName": { count, lastUsed, accountName, roleName, consoleUrl } }
+  let usageData = {};
+  let isRendering = false;
+  let renderQueued = false;
 
-  // Save favorites to localStorage
-  function saveFavorites() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify([...favorites]));
+  // Load saved state
+  function loadState() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      state.favoriteAccounts = new Set(saved.favoriteAccounts || []);
+      state.favoriteRoles = new Set(saved.favoriteRoles || []);
+      state.favoriteCombos = new Set(saved.favoriteCombos || []);
+    } catch (e) {}
+    try {
+      usageData = JSON.parse(localStorage.getItem(USAGE_KEY) || '{}');
+    } catch (e) { usageData = {}; }
   }
 
-  // Get favorite key
-  function getFavKey(accountId, roleName) {
-    return `${accountId}:${roleName}`;
+  function saveState() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      favoriteAccounts: [...state.favoriteAccounts],
+      favoriteRoles: [...state.favoriteRoles],
+      favoriteCombos: [...state.favoriteCombos]
+    }));
   }
 
-  // Toggle favorite
-  function toggleFavorite(accountId, roleName) {
-    const key = getFavKey(accountId, roleName);
-    if (favorites.has(key)) {
-      favorites.delete(key);
-    } else {
-      favorites.add(key);
-    }
-    saveFavorites();
-    applyFilters();
-    renderFavoritesList();
+  function trackUsage(accountId, accountName, roleName, consoleUrl) {
+    const key = `${accountId}:${roleName}`;
+    const existing = usageData[key] || { count: 0 };
+    usageData[key] = {
+      count: existing.count + 1,
+      lastUsed: Date.now(),
+      accountId,
+      accountName,
+      roleName,
+      consoleUrl
+    };
+    localStorage.setItem(USAGE_KEY, JSON.stringify(usageData));
   }
 
-  // Check if favorite
-  function isFavorite(accountId, roleName) {
-    return favorites.has(getFavKey(accountId, roleName));
+  function getRecentlyUsed(limit = 5) {
+    return Object.values(usageData)
+      .sort((a, b) => b.lastUsed - a.lastUsed)
+      .slice(0, limit);
   }
 
-  // Get all account buttons
+  function getFrequentlyUsed(limit = 5) {
+    return Object.values(usageData)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
+  // ========== DOM HELPERS ==========
+  function $(sel, ctx = document) { return ctx.querySelector(sel); }
+  function $$(sel, ctx = document) { return [...ctx.querySelectorAll(sel)]; }
+
+  // ========== ACCOUNT DATA EXTRACTION ==========
   function getAccountButtons() {
-    return document.querySelectorAll('button[data-testid="account-list-cell"]');
+    return $$('button[data-testid="account-list-cell"]');
   }
 
-  // Get account info from button
-  function getAccountInfo(button) {
-    const container = button.closest('.UQDbz64f0aRBYmzupdOU') || button.closest('[class*="cevwRopJqwHgUyz"]') || button.parentElement;
-    const nameEl = button.querySelector('strong span');
-    const spans = button.querySelectorAll('p span');
-    
-    let accountId = '';
-    let accountName = nameEl ? nameEl.textContent.trim() : '';
-    let email = '';
-    
-    spans.forEach(span => {
-      const text = span.textContent.trim();
-      if (/^\d{12}$/.test(text)) {
-        accountId = text;
-      } else if (text.includes('@')) {
-        email = text;
-      }
+  function parseAccountButton(btn) {
+    const nameEl = $('strong span', btn);
+    const spans = $$('p span', btn);
+    let id = '', name = nameEl?.textContent?.trim() || '', email = '';
+    spans.forEach(s => {
+      const t = s.textContent.trim();
+      if (/^\d{12}$/.test(t)) id = t;
+      else if (t.includes('@')) email = t;
     });
-
-    return { container, accountId, accountName, email, button };
+    return { id, name, email, element: btn, expanded: btn.getAttribute('aria-expanded') === 'true' };
   }
 
-  // Get roles for an expanded account
-  function getAccountRoles(accountContainer) {
-    const roleContainer = accountContainer.querySelector('[data-testid="role-list-container"]');
+  function getAccountRoles(btn) {
+    const container = btn.closest('.UQDbz64f0aRBYmzupdOU') || btn.closest('[class*="cevwRopJqwHgUyz"]') || btn.parentElement;
+    const roleContainer = container?.querySelector('[data-testid="role-list-container"]');
     if (!roleContainer) return [];
-    
-    const roleItems = roleContainer.querySelectorAll('[data-testid="role-list-item"]');
-    return Array.from(roleItems).map(item => {
-      const link = item.querySelector('[data-testid="federation-link"]');
-      const roleName = link ? link.textContent.trim() : '';
-      const href = link ? link.getAttribute('href') : '';
-      return { roleName, href, element: item };
+    return $$('[data-testid="role-list-item"]', roleContainer).map(item => {
+      const link = $('[data-testid="federation-link"]', item);
+      const keysLink = $('[data-testid="role-creation-action-button"]', item);
+      return {
+        name: link?.textContent?.trim() || '',
+        consoleUrl: link?.getAttribute('href') || '',
+        element: item,
+        keysElement: keysLink
+      };
     });
   }
 
-  // Expand all accounts with delay to avoid rate limiting
-  async function expandAllAccounts(progressCallback) {
-    if (isExpanding) return;
-    isExpanding = true;
+  // ========== SMART EXPANSION WITH BACKOFF ==========
+  async function expandAccount(btn) {
+    if (btn.getAttribute('aria-expanded') === 'true') return true;
     
-    const buttons = getAccountButtons();
-    const unexpanded = Array.from(buttons).filter(b => b.getAttribute('aria-expanded') === 'false');
+    btn.click();
     
-    let expanded = 0;
-    let delay = 150; // Start with 150ms delay
-    const maxDelay = 2000;
-    const minDelay = 100;
-    let consecutiveSuccess = 0;
+    // Wait for roles to appear or timeout
+    const startTime = Date.now();
+    const maxWait = 5000;
     
-    for (const button of unexpanded) {
-      button.click();
-      expanded++;
-      if (progressCallback) {
-        progressCallback(expanded, unexpanded.length, delay);
+    while (Date.now() - startTime < maxWait) {
+      await sleep(50);
+      const roles = getAccountRoles(btn);
+      if (roles.length > 0) {
+        state.consecutiveErrors = 0;
+        state.currentDelay = Math.max(50, state.currentDelay - 10);
+        return true;
       }
-      
-      // Wait and check for rate limiting
-      await new Promise(r => setTimeout(r, delay));
-      
-      // Adaptive delay - slow down if we're going too fast
-      // Speed up gradually after successful batches
-      if (expanded % 5 === 0) {
-        consecutiveSuccess++;
-        if (consecutiveSuccess > 2 && delay > minDelay) {
-          delay = Math.max(minDelay, delay - 25);
-        }
+      // Check if still loading (look for spinner or loading state)
+      if (btn.getAttribute('aria-expanded') === 'true') {
+        // Expanded but no roles yet - might be rate limited or loading
+        await sleep(100);
       }
     }
     
-    isExpanding = false;
-    return expanded;
+    // Timeout - likely rate limited
+    state.consecutiveErrors++;
+    state.currentDelay = Math.min(5000, state.currentDelay * 2);
+    return false;
   }
-  
-  // Expand accounts sequentially with delays to avoid rate limiting
-  async function expandAccountsBatched(progressCallback, batchSize = 3) {
-    if (isExpanding) return;
-    isExpanding = true;
+
+  async function expandAllAccounts(onProgress) {
+    if (state.isLoading) return;
+    state.isLoading = true;
+    state.currentDelay = 100;
+    state.consecutiveErrors = 0;
     
     const buttons = getAccountButtons();
-    const unexpanded = Array.from(buttons).filter(b => b.getAttribute('aria-expanded') === 'false');
+    const toExpand = buttons.filter(b => b.getAttribute('aria-expanded') === 'false');
+    state.loadingProgress = { current: 0, total: toExpand.length };
     
-    let expanded = 0;
-    
-    for (let i = 0; i < unexpanded.length; i++) {
-      const button = unexpanded[i];
-      button.click();
-      expanded++;
+    for (let i = 0; i < toExpand.length; i++) {
+      const btn = toExpand[i];
+      const success = await expandAccount(btn);
       
-      if (progressCallback) {
-        progressCallback(expanded, unexpanded.length);
-      }
+      state.loadingProgress.current = i + 1;
+      if (onProgress) onProgress(state.loadingProgress);
       
-      // Delay after each expansion - longer pause every few accounts
-      if ((i + 1) % batchSize === 0) {
-        // Longer pause every 3 accounts (batch boundary)
-        await new Promise(r => setTimeout(r, 3000));
+      // Adaptive delay
+      if (!success) {
+        // Failed - back off significantly
+        await sleep(state.currentDelay);
+      } else if (state.consecutiveErrors > 0) {
+        // Recovering from errors
+        await sleep(state.currentDelay);
       } else {
-        // Short delay between individual accounts
-        await new Promise(r => setTimeout(r, 500));
+        // Going well - minimal delay
+        await sleep(Math.max(30, state.currentDelay));
+      }
+      
+      // If too many consecutive errors, pause longer
+      if (state.consecutiveErrors >= 3) {
+        await sleep(3000);
+        state.consecutiveErrors = 0;
       }
     }
     
-    isExpanding = false;
-    return expanded;
+    state.isLoading = false;
+    refreshAccountData();
+    render();
   }
 
-  // Collapse all accounts
-  function collapseAllAccounts() {
-    const buttons = getAccountButtons();
-    buttons.forEach(button => {
-      if (button.getAttribute('aria-expanded') === 'true') {
-        button.click();
-      }
-    });
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
   }
 
-  // Apply filters to show/hide accounts and roles
-  function applyFilters() {
-    const buttons = getAccountButtons();
-    const accountFilterLower = accountFilter.toLowerCase();
-    const roleFilterLower = roleFilter.toLowerCase();
-    
-    let visibleAccounts = 0;
-    let visibleRoles = 0;
-    let totalRoles = 0;
-
-    buttons.forEach(button => {
-      const info = getAccountInfo(button);
-      const container = info.container;
-      if (!container) return;
-      
-      // Check account match
-      const accountMatches = !accountFilterLower || 
-        info.accountName.toLowerCase().includes(accountFilterLower) ||
-        info.accountId.includes(accountFilterLower) ||
-        info.email.toLowerCase().includes(accountFilterLower);
-      
-      // Get roles and check matches
-      const roles = getAccountRoles(container);
-      totalRoles += roles.length;
-      
-      let hasMatchingRole = roles.length === 0; // If no roles loaded yet, don't hide
-      let hasVisibleRole = false;
-      let hasFavoriteRole = false;
-      
-      roles.forEach(role => {
-        const roleMatches = !roleFilterLower || role.roleName.toLowerCase().includes(roleFilterLower);
-        const isFav = isFavorite(info.accountId, role.roleName);
-        
-        if (isFav) hasFavoriteRole = true;
-        
-        const shouldShowRole = roleMatches && (!showFavoritesOnly || isFav);
-        
-        if (role.element) {
-          role.element.style.display = shouldShowRole ? '' : 'none';
-        }
-        
-        if (shouldShowRole) {
-          hasVisibleRole = true;
-          visibleRoles++;
-        }
-        if (roleMatches) hasMatchingRole = true;
-      });
-      
-      // Show account if it matches AND has matching roles (or no role filter)
-      const shouldShowAccount = accountMatches && 
-        (hasMatchingRole || !roleFilterLower) && 
-        (!showFavoritesOnly || hasFavoriteRole || roles.length === 0);
-      
-      // Find the outermost container to hide
-      const outerContainer = container.closest('.cevwRopJqwHgUyz_lEix') || container;
-      outerContainer.style.display = shouldShowAccount ? '' : 'none';
-      
-      if (shouldShowAccount) visibleAccounts++;
-    });
-    
-    // Update stats
-    updateStats(visibleAccounts, buttons.length, visibleRoles, totalRoles);
-  }
-
-  // Update stats display
-  function updateStats(visibleAccounts, totalAccounts, visibleRoles, totalRoles) {
-    const statsEl = document.getElementById('sso-enhancer-stats');
-    if (statsEl) {
-      statsEl.innerHTML = `
-        <span>Accounts: <strong>${visibleAccounts}/${totalAccounts}</strong></span>
-        <span>Roles: <strong>${visibleRoles}/${totalRoles}</strong></span>
-        <span>Favorites: <strong>${favorites.size}</strong></span>
-      `;
+  // ========== FAVORITES ==========
+  function toggleFavoriteAccount(accountId) {
+    if (state.favoriteAccounts.has(accountId)) {
+      state.favoriteAccounts.delete(accountId);
+    } else {
+      state.favoriteAccounts.add(accountId);
     }
+    saveState();
+    render();
   }
 
-  // Add favorite stars to role items
-  function injectFavoriteStars() {
-    const buttons = getAccountButtons();
-    
-    buttons.forEach(button => {
-      const info = getAccountInfo(button);
-      const container = info.container;
-      if (!container) return;
-      
-      const roles = getAccountRoles(container);
-      
-      roles.forEach(role => {
-        // Check if star already exists
-        if (role.element.querySelector('.sso-enhancer-star')) return;
-        
-        const star = document.createElement('button');
-        star.className = 'sso-enhancer-star';
-        star.innerHTML = isFavorite(info.accountId, role.roleName) ? '★' : '☆';
-        star.style.cssText = `
-          background: none;
-          border: none;
-          cursor: pointer;
-          font-size: 18px;
-          color: ${isFavorite(info.accountId, role.roleName) ? '#ffd700' : '#666'};
-          padding: 0 8px;
-          margin-right: 4px;
-          transition: all 0.2s;
-          vertical-align: middle;
-        `;
-        star.title = isFavorite(info.accountId, role.roleName) ? 'Remove from favorites' : 'Add to favorites';
-        
-        star.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          toggleFavorite(info.accountId, role.roleName);
-          star.innerHTML = isFavorite(info.accountId, role.roleName) ? '★' : '☆';
-          star.style.color = isFavorite(info.accountId, role.roleName) ? '#ffd700' : '#666';
-          star.title = isFavorite(info.accountId, role.roleName) ? 'Remove from favorites' : 'Add to favorites';
-        });
-        
-        star.addEventListener('mouseenter', () => {
-          star.style.transform = 'scale(1.2)';
-        });
-        star.addEventListener('mouseleave', () => {
-          star.style.transform = 'scale(1)';
-        });
-        
-        role.element.insertBefore(star, role.element.firstChild);
-      });
+  function toggleFavoriteRole(roleName) {
+    if (state.favoriteRoles.has(roleName)) {
+      state.favoriteRoles.delete(roleName);
+    } else {
+      state.favoriteRoles.add(roleName);
+    }
+    saveState();
+    render();
+  }
+
+  function toggleFavoriteCombo(accountId, roleName) {
+    const key = `${accountId}:${roleName}`;
+    if (state.favoriteCombos.has(key)) {
+      state.favoriteCombos.delete(key);
+    } else {
+      state.favoriteCombos.add(key);
+    }
+    saveState();
+    render();
+  }
+
+  function isFavorite(accountId, roleName) {
+    return state.favoriteAccounts.has(accountId) ||
+           state.favoriteRoles.has(roleName) ||
+           state.favoriteCombos.has(`${accountId}:${roleName}`);
+  }
+
+  // ========== DATA REFRESH ==========
+  function refreshAccountData() {
+    state.accounts = getAccountButtons().map(btn => {
+      const info = parseAccountButton(btn);
+      const roles = getAccountRoles(btn);
+      return { ...info, roles };
     });
   }
 
-  // Render favorites quick access list
-  function renderFavoritesList() {
-    const container = document.getElementById('sso-enhancer-favorites');
-    if (!container) return;
+  // ========== FILTERING ==========
+  function getFilteredAccounts() {
+    const af = state.accountFilter.toLowerCase();
+    const rf = state.roleFilter.toLowerCase();
     
-    if (favorites.size === 0) {
-      container.innerHTML = '<div style="color: #888; font-style: italic;">No favorites yet. Click ☆ next to roles to add them.</div>';
+    return state.accounts.map(acc => {
+      const accountMatches = !af || 
+        acc.name.toLowerCase().includes(af) ||
+        acc.id.includes(af) ||
+        acc.email.toLowerCase().includes(af);
+      
+      const filteredRoles = acc.roles.filter(role => {
+        const roleMatches = !rf || role.name.toLowerCase().includes(rf);
+        const isFav = isFavorite(acc.id, role.name);
+        return roleMatches && (!state.showFavoritesOnly || isFav);
+      });
+      
+      const hasMatchingRoles = filteredRoles.length > 0 || acc.roles.length === 0;
+      const hasFavoriteRole = acc.roles.some(r => isFavorite(acc.id, r.name));
+      
+      const show = accountMatches && hasMatchingRoles && 
+        (!state.showFavoritesOnly || hasFavoriteRole || state.favoriteAccounts.has(acc.id));
+      
+      return { ...acc, filteredRoles, show };
+    }).filter(a => a.show);
+  }
+
+  function getFavoriteItems() {
+    // Get all favorite combos with account context
+    const items = [];
+    
+    state.accounts.forEach(acc => {
+      acc.roles.forEach(role => {
+        if (isFavorite(acc.id, role.name)) {
+          items.push({
+            accountId: acc.id,
+            accountName: acc.name,
+            roleName: role.name,
+            consoleUrl: role.consoleUrl,
+            isFavAccount: state.favoriteAccounts.has(acc.id),
+            isFavRole: state.favoriteRoles.has(role.name),
+            isFavCombo: state.favoriteCombos.has(`${acc.id}:${role.name}`)
+          });
+        }
+      });
+    });
+    
+    // Sort: combos first, then by account name
+    return items.sort((a, b) => {
+      if (a.isFavCombo !== b.isFavCombo) return a.isFavCombo ? -1 : 1;
+      return a.accountName.localeCompare(b.accountName);
+    });
+  }
+
+  // ========== UI RENDERING ==========
+  function render() {
+    // Prevent re-entrant rendering
+    if (isRendering) {
+      renderQueued = true;
       return;
     }
     
-    // Get current account data
-    const accountMap = new Map();
-    getAccountButtons().forEach(button => {
-      const info = getAccountInfo(button);
-      if (info.accountId) {
-        accountMap.set(info.accountId, info);
-      }
-    });
+    const container = $('#sso-enhancer-app');
+    if (!container) return;
     
-    let html = '';
-    [...favorites].sort().forEach(fav => {
-      const [accountId, roleName] = fav.split(':');
-      const accountInfo = accountMap.get(accountId);
-      const accountName = accountInfo ? accountInfo.accountName : accountId;
-      
-      html += `
-        <div class="sso-enhancer-fav-item" data-account="${accountId}" data-role="${roleName}">
-          <div class="sso-enhancer-fav-info">
-            <span class="sso-enhancer-fav-account">${accountName}</span>
-            <span class="sso-enhancer-fav-role">${roleName}</span>
-          </div>
-          <div class="sso-enhancer-fav-actions">
-            <a href="#/console?account_id=${accountId}&role_name=${encodeURIComponent(roleName)}" 
-               target="_blank" class="sso-enhancer-btn sso-enhancer-btn-console">Console</a>
-            <button class="sso-enhancer-btn sso-enhancer-btn-remove" data-fav="${fav}">✕</button>
-          </div>
+    isRendering = true;
+    
+    // Save focus state before DOM update
+    const activeEl = document.activeElement;
+    const focusId = activeEl?.id;
+    const selStart = activeEl?.selectionStart;
+    const selEnd = activeEl?.selectionEnd;
+    
+    const filtered = getFilteredAccounts();
+    const favorites = getFavoriteItems();
+    const totalRoles = state.accounts.reduce((sum, a) => sum + a.roles.length, 0);
+    const visibleRoles = filtered.reduce((sum, a) => sum + a.filteredRoles.length, 0);
+    
+    container.innerHTML = `
+      <div class="sse-toolbar">
+        <div class="sse-toolbar-left">
+          <input type="text" class="sse-input" id="sse-account-filter" 
+                 placeholder="🔍 Account..." value="${escapeHtml(state.accountFilter)}">
+          <input type="text" class="sse-input" id="sse-role-filter" 
+                 placeholder="🔍 Role..." value="${escapeHtml(state.roleFilter)}">
+          <label class="sse-toggle">
+            <input type="checkbox" id="sse-favorites-only" ${state.showFavoritesOnly ? 'checked' : ''}>
+            <span>★ Favorites</span>
+          </label>
         </div>
-      `;
-    });
-    
-    container.innerHTML = html;
-    
-    // Add remove handlers
-    container.querySelectorAll('.sso-enhancer-btn-remove').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const fav = btn.dataset.fav;
-        favorites.delete(fav);
-        saveFavorites();
-        renderFavoritesList();
-        injectFavoriteStars();
-        applyFilters();
-      });
-    });
-  }
-
-  // Create the enhancer panel
-  function createPanel() {
-    const panel = document.createElement('div');
-    panel.id = 'sso-enhancer-panel';
-    panel.innerHTML = `
-      <div class="sso-enhancer-header">
-        <div class="sso-enhancer-title">
-          <span class="sso-enhancer-logo">☁️</span>
-          <span>SSO Enhancer</span>
-        </div>
-        <button id="sso-enhancer-close" class="sso-enhancer-close">×</button>
-      </div>
-      
-      <div class="sso-enhancer-section">
-        <div class="sso-enhancer-actions">
-          <button id="sso-enhancer-expand" class="sso-enhancer-btn sso-enhancer-btn-primary" title="Expand 5 at a time with pauses (safer)">
-            📂 Expand All
-          </button>
-          <button id="sso-enhancer-collapse" class="sso-enhancer-btn">
-            📁 Collapse
+        <div class="sse-toolbar-right">
+          <span class="sse-stats">${filtered.length}/${state.accounts.length} accounts · ${visibleRoles}/${totalRoles} roles</span>
+          <button class="sse-btn sse-btn-primary" id="sse-expand-all" data-action="expand-all" ${state.isLoading ? 'disabled' : ''}>
+            ${state.isLoading ? `⏳ ${state.loadingProgress.current}/${state.loadingProgress.total}` : '📂 Expand All'}
           </button>
         </div>
-        <div id="sso-enhancer-progress" style="display: none;">
-          <div class="sso-enhancer-progress-bar">
-            <div class="sso-enhancer-progress-fill"></div>
-          </div>
-          <span class="sso-enhancer-progress-text">0/0</span>
-        </div>
-        <div id="sso-enhancer-rate-warning" style="display: none; margin-top: 8px; padding: 8px; background: rgba(255,100,100,0.1); border-radius: 4px; font-size: 11px; color: #ff9999;">
-          ⚠️ Going slow to avoid rate limits...
-        </div>
       </div>
       
-      <div class="sso-enhancer-section">
-        <label class="sso-enhancer-label">Filter by Account</label>
-        <input type="text" id="sso-enhancer-account-filter" class="sso-enhancer-input" 
-               placeholder="Name, ID, or email...">
-      </div>
+      ${renderQuickAccessPanel(favorites)}
       
-      <div class="sso-enhancer-section">
-        <label class="sso-enhancer-label">Filter by Role</label>
-        <input type="text" id="sso-enhancer-role-filter" class="sso-enhancer-input" 
-               placeholder="Permission set name...">
-      </div>
-      
-      <div class="sso-enhancer-section">
-        <label class="sso-enhancer-toggle-container">
-          <input type="checkbox" id="sso-enhancer-favorites-only">
-          <span class="sso-enhancer-toggle-label">★ Show favorites only</span>
-        </label>
-      </div>
-      
-      <div id="sso-enhancer-stats" class="sso-enhancer-stats"></div>
-      
-      <div class="sso-enhancer-section">
-        <div class="sso-enhancer-label" style="margin-bottom: 8px;">★ Quick Access</div>
-        <div id="sso-enhancer-favorites" class="sso-enhancer-favorites"></div>
-      </div>
-      
-      <div class="sso-enhancer-footer">
-        <button id="sso-enhancer-refresh" class="sso-enhancer-btn">🔄 Refresh</button>
-        <button id="sso-enhancer-export" class="sso-enhancer-btn">📤 Export</button>
+      <div class="sse-accounts">
+        ${filtered.map(acc => renderAccount(acc)).join('')}
+        ${filtered.length === 0 ? '<div class="sse-empty">No matching accounts</div>' : ''}
       </div>
     `;
     
-    // Inject styles
+    bindEvents();
+    
+    // Restore focus after DOM update
+    if (focusId) {
+      const el = document.getElementById(focusId);
+      if (el) {
+        el.focus();
+        if (typeof selStart === 'number' && el.setSelectionRange) {
+          el.setSelectionRange(selStart, selEnd);
+        }
+      }
+    }
+    
+    isRendering = false;
+    if (renderQueued) {
+      renderQueued = false;
+      setTimeout(render, 0);
+    }
+  }
+
+  function renderQuickAccessOnly() {
+    const container = $('.sse-quick-access');
+    if (!container) return;
+    const favorites = getFavoriteItems();
+    const newHtml = renderQuickAccessPanel(favorites);
+    if (newHtml) {
+      const temp = document.createElement('div');
+      temp.innerHTML = newHtml;
+      const newPanel = temp.firstElementChild;
+      if (newPanel) container.replaceWith(newPanel);
+    }
+  }
+
+  function renderQuickAccessPanel(favorites) {
+    const recent = getRecentlyUsed(5);
+    const frequent = getFrequentlyUsed(5);
+    const hasContent = favorites.length > 0 || recent.length > 0 || frequent.length > 0;
+    if (!hasContent) return '';
+
+    const renderCard = (item, showCount = false) => `
+      <a href="${item.consoleUrl}" class="sse-qa-card" target="_blank" 
+         data-track="${item.accountId || ''}" data-track-name="${escapeHtml(item.accountName || '')}" 
+         data-track-role="${escapeHtml(item.roleName || '')}"
+         title="${item.accountName} → ${item.roleName}">
+        <span class="sse-qa-account">${escapeHtml(item.accountName || '')}</span>
+        <span class="sse-qa-role-row">
+          <span class="sse-qa-role">${escapeHtml(item.roleName || '')}</span>
+          ${showCount ? `<span class="sse-qa-count">${item.count}×</span>` : ''}
+        </span>
+      </a>
+    `;
+
+    return `
+      <div class="sse-quick-access">
+        ${favorites.length > 0 ? `
+          <div class="sse-qa-section">
+            <div class="sse-qa-title">★ Favorites</div>
+            <div class="sse-qa-list">
+              ${favorites.slice(0, 6).map(f => renderCard({ 
+                accountId: f.accountId, accountName: f.accountName, 
+                roleName: f.roleName, consoleUrl: f.consoleUrl 
+              })).join('')}
+            </div>
+          </div>
+        ` : ''}
+        ${recent.length > 0 ? `
+          <div class="sse-qa-section">
+            <div class="sse-qa-title">🕐 Recent</div>
+            <div class="sse-qa-list">
+              ${recent.map(r => renderCard(r)).join('')}
+            </div>
+          </div>
+        ` : ''}
+        ${frequent.length > 0 ? `
+          <div class="sse-qa-section">
+            <div class="sse-qa-title">🔥 Frequent</div>
+            <div class="sse-qa-list">
+              ${frequent.map(f => renderCard(f, true)).join('')}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function renderAccount(acc) {
+    const isExpanded = acc.roles.length > 0;
+    const isFavAcc = state.favoriteAccounts.has(acc.id);
+    
+    return `
+      <div class="sse-account ${isFavAcc ? 'sse-account-fav' : ''}" data-account-id="${acc.id}">
+        <div class="sse-account-header">
+          <button class="sse-star ${isFavAcc ? 'active' : ''}" data-action="fav-account" data-id="${acc.id}" title="Favorite account">
+            ${isFavAcc ? '★' : '☆'}
+          </button>
+          <div class="sse-account-info">
+            <span class="sse-account-name">${escapeHtml(acc.name)}</span>
+            <span class="sse-account-id">${acc.id}</span>
+          </div>
+          <button class="sse-expand-btn" data-action="expand" data-id="${acc.id}">
+            ${isExpanded ? '▼' : '▶'}
+          </button>
+        </div>
+        ${isExpanded ? `
+          <div class="sse-roles">
+            ${acc.filteredRoles.map(role => renderRole(acc, role)).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function renderRole(acc, role) {
+    const isFavRole = state.favoriteRoles.has(role.name);
+    const isFavCombo = state.favoriteCombos.has(`${acc.id}:${role.name}`);
+    const starClass = isFavCombo ? 'combo' : (isFavRole ? 'role' : '');
+    
+    return `
+      <div class="sse-role ${isFavCombo || isFavRole ? 'sse-role-fav' : ''}">
+        <button class="sse-star ${starClass}" data-action="fav-role" data-account="${acc.id}" data-role="${escapeHtml(role.name)}" 
+                title="Click: favorite combo, Shift+Click: favorite role everywhere">
+          ${isFavCombo ? '★' : (isFavRole ? '◆' : '☆')}
+        </button>
+        <a href="${role.consoleUrl}" class="sse-role-name" target="_blank">${escapeHtml(role.name)}</a>
+        <a href="#" class="sse-role-keys" data-action="keys" data-account="${acc.id}" data-role="${escapeHtml(role.name)}">🔑</a>
+      </div>
+    `;
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // ========== EVENT BINDING ==========
+  let eventsBound = false;
+  
+  function bindEvents() {
+    const app = $('#sso-enhancer-app');
+    if (!app) return;
+    
+    // Only bind delegated events once
+    if (eventsBound) return;
+    eventsBound = true;
+    
+    // Delegated events - handles all clicks via event delegation
+    app.addEventListener('click', e => {
+      const action = e.target.closest('[data-action]');
+      if (!action) return;
+      
+      const actionType = action.dataset.action;
+      
+      if (actionType === 'fav-account') {
+        toggleFavoriteAccount(action.dataset.id);
+      } else if (actionType === 'fav-role') {
+        const accountId = action.dataset.account;
+        const roleName = action.dataset.role;
+        if (e.shiftKey) {
+          toggleFavoriteRole(roleName);
+        } else {
+          toggleFavoriteCombo(accountId, roleName);
+        }
+      } else if (actionType === 'expand') {
+        const accData = state.accounts.find(a => a.id === action.dataset.id);
+        if (accData?.element) {
+          accData.element.click();
+          setTimeout(() => {
+            refreshAccountData();
+            render();
+          }, 500);
+        }
+      } else if (actionType === 'keys') {
+        e.preventDefault();
+        const accountId = action.dataset.account;
+        const roleName = action.dataset.role;
+        const acc = state.accounts.find(a => a.id === accountId);
+        const role = acc?.roles.find(r => r.name === roleName);
+        if (role?.keysElement) role.keysElement.click();
+      } else if (actionType === 'expand-all') {
+        expandAllAccounts(progress => {
+          const btn = $('#sse-expand-all');
+          if (btn) btn.textContent = `⏳ ${progress.current}/${progress.total}`;
+        }).then(() => render());
+      }
+    });
+    
+    // Delegated input events
+    app.addEventListener('input', e => {
+      if (e.target.id === 'sse-account-filter') {
+        state.accountFilter = e.target.value;
+        render();
+      } else if (e.target.id === 'sse-role-filter') {
+        state.roleFilter = e.target.value;
+        render();
+      }
+    });
+    
+    app.addEventListener('change', e => {
+      if (e.target.id === 'sse-favorites-only') {
+        state.showFavoritesOnly = e.target.checked;
+        render();
+      }
+    });
+
+    // Track usage when clicking role links or quick access cards
+    app.addEventListener('click', e => {
+      let tracked = false;
+      // Quick access cards
+      const qaCard = e.target.closest('.sse-qa-card[data-track]');
+      if (qaCard && qaCard.dataset.track) {
+        trackUsage(qaCard.dataset.track, qaCard.dataset.trackName, qaCard.dataset.trackRole, qaCard.href);
+        tracked = true;
+      }
+      // Role links in main list
+      const roleLink = e.target.closest('.sse-role-name');
+      if (roleLink) {
+        const roleEl = roleLink.closest('.sse-role');
+        const accountEl = roleLink.closest('.sse-account');
+        if (roleEl && accountEl) {
+          const accountId = accountEl.dataset.accountId;
+          const acc = state.accounts.find(a => a.id === accountId);
+          if (acc) {
+            const roleName = roleLink.textContent.trim();
+            trackUsage(accountId, acc.name, roleName, roleLink.href);
+            tracked = true;
+          }
+        }
+      }
+      // Re-render quick access immediately to show updated recent/frequent
+      if (tracked) {
+        setTimeout(() => renderQuickAccessOnly(), 50);
+      }
+    });
+  }
+
+  // ========== STYLES ==========
+  function injectStyles() {
     const style = document.createElement('style');
     style.id = 'sso-enhancer-styles';
     style.textContent = `
-      #sso-enhancer-panel {
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        width: 340px;
-        max-height: calc(100vh - 40px);
-        background: linear-gradient(135deg, #1a1f2e 0%, #0d1117 100%);
-        border: 1px solid #30363d;
-        border-radius: 12px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-        z-index: 99999;
+      #sso-enhancer-app {
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #0d1117;
         color: #e6edf3;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
+        min-height: 100vh;
+        padding: 0;
       }
       
-      #sso-enhancer-panel.minimized {
-        width: auto;
-        height: auto;
-        max-height: none;
-      }
-      
-      #sso-enhancer-panel.minimized > *:not(.sso-enhancer-header) {
-        display: none !important;
-      }
-      
-      .sso-enhancer-header {
+      .sse-toolbar {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        padding: 12px 16px;
-        background: rgba(255,153,0,0.1);
+        padding: 12px 20px;
+        background: linear-gradient(180deg, #161b22 0%, #0d1117 100%);
         border-bottom: 1px solid #30363d;
-        cursor: move;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        gap: 16px;
+        flex-wrap: wrap;
       }
       
-      .sso-enhancer-title {
+      .sse-toolbar-left {
         display: flex;
+        gap: 10px;
         align-items: center;
-        gap: 8px;
-        font-weight: 600;
-        font-size: 14px;
+        flex-wrap: wrap;
       }
       
-      .sso-enhancer-logo {
-        font-size: 18px;
+      .sse-toolbar-right {
+        display: flex;
+        gap: 12px;
+        align-items: center;
       }
       
-      .sso-enhancer-close {
-        background: none;
-        border: none;
-        color: #8b949e;
-        font-size: 24px;
-        cursor: pointer;
-        padding: 0;
-        line-height: 1;
-        transition: color 0.2s;
-      }
-      
-      .sso-enhancer-close:hover {
-        color: #ff6b6b;
-      }
-      
-      .sso-enhancer-section {
-        padding: 12px 16px;
-        border-bottom: 1px solid #21262d;
-      }
-      
-      .sso-enhancer-label {
-        display: block;
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
-        color: #8b949e;
-        margin-bottom: 6px;
-      }
-      
-      .sso-enhancer-input {
-        width: 100%;
-        padding: 10px 12px;
-        background: #0d1117;
+      .sse-input {
+        padding: 8px 12px;
+        background: #21262d;
         border: 1px solid #30363d;
         border-radius: 6px;
         color: #e6edf3;
         font-size: 13px;
-        transition: border-color 0.2s, box-shadow 0.2s;
+        width: 160px;
+        transition: all 0.15s;
       }
       
-      .sso-enhancer-input:focus {
+      .sse-input:focus {
         outline: none;
         border-color: #ff9900;
-        box-shadow: 0 0 0 3px rgba(255,153,0,0.15);
+        box-shadow: 0 0 0 2px rgba(255,153,0,0.2);
       }
       
-      .sso-enhancer-input::placeholder {
-        color: #6e7681;
-      }
-      
-      .sso-enhancer-actions {
+      .sse-toggle {
         display: flex;
-        gap: 8px;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        color: #ffd700;
+        padding: 8px 12px;
+        background: #21262d;
+        border-radius: 6px;
+        border: 1px solid #30363d;
+        transition: all 0.15s;
       }
       
-      .sso-enhancer-btn {
-        padding: 8px 14px;
+      .sse-toggle:hover {
+        background: #30363d;
+      }
+      
+      .sse-toggle input {
+        accent-color: #ff9900;
+      }
+      
+      .sse-stats {
+        font-size: 12px;
+        color: #8b949e;
+      }
+      
+      .sse-btn {
+        padding: 8px 16px;
         border-radius: 6px;
         border: 1px solid #30363d;
         background: #21262d;
         color: #e6edf3;
-        font-size: 12px;
+        font-size: 13px;
         font-weight: 500;
         cursor: pointer;
-        transition: all 0.2s;
-        white-space: nowrap;
+        transition: all 0.15s;
       }
       
-      .sso-enhancer-btn:hover {
+      .sse-btn:hover:not(:disabled) {
         background: #30363d;
-        border-color: #8b949e;
       }
       
-      .sso-enhancer-btn-primary {
+      .sse-btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      
+      .sse-btn-primary {
         background: #ff9900;
         border-color: #ff9900;
         color: #000;
       }
       
-      .sso-enhancer-btn-primary:hover {
+      .sse-btn-primary:hover:not(:disabled) {
         background: #e68a00;
-        border-color: #e68a00;
       }
       
-      .sso-enhancer-btn-console {
-        background: #238636;
-        border-color: #238636;
-        color: #fff;
+      /* Quick Access Panel */
+      .sse-quick-access {
+        display: flex;
+        gap: 20px;
+        padding: 12px 20px;
+        background: rgba(255,215,0,0.02);
+        border-bottom: 1px solid #30363d;
+        overflow-x: auto;
+      }
+      
+      .sse-qa-section {
+        flex: 1;
+        min-width: 200px;
+        max-width: 300px;
+      }
+      
+      .sse-qa-title {
         font-size: 11px;
-        padding: 4px 10px;
-      }
-      
-      .sso-enhancer-btn-console:hover {
-        background: #2ea043;
-      }
-      
-      .sso-enhancer-btn-remove {
-        background: transparent;
-        border: none;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
         color: #8b949e;
-        padding: 4px 8px;
-        font-size: 14px;
+        margin-bottom: 8px;
+        white-space: nowrap;
       }
       
-      .sso-enhancer-btn-remove:hover {
-        color: #ff6b6b;
+      .sse-qa-section:first-child .sse-qa-title { color: #ffd700; }
+      .sse-qa-section:nth-child(2) .sse-qa-title { color: #58a6ff; }
+      .sse-qa-section:nth-child(3) .sse-qa-title { color: #f97316; }
+      
+      .sse-qa-list {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
       
-      .sso-enhancer-toggle-container {
+      .sse-qa-card {
+        display: flex;
+        flex-direction: column;
+        padding: 6px 10px;
+        background: #21262d;
+        border: 1px solid #30363d;
+        border-radius: 4px;
+        text-decoration: none;
+        color: inherit;
+        transition: all 0.15s;
+      }
+      
+      .sse-qa-card:hover {
+        background: #30363d;
+        border-color: #484f58;
+      }
+      
+      .sse-qa-account {
+        font-size: 12px;
+        color: #e6edf3;
+        margin-bottom: 2px;
+      }
+      
+      .sse-qa-role-row {
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
+      }
+      
+      .sse-qa-role {
+        font-size: 11px;
+        color: #58a6ff;
+      }
+      
+      .sse-qa-count {
+        font-size: 10px;
+        color: #6e7681;
+        background: #161b22;
+        padding: 1px 4px;
+        border-radius: 3px;
+      }
+      
+      /* Accounts List */
+      .sse-accounts {
+        padding: 12px 20px;
+      }
+      
+      .sse-account {
+        margin-bottom: 8px;
+        background: #161b22;
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        overflow: hidden;
+        transition: all 0.15s;
+      }
+      
+      .sse-account:hover {
+        border-color: #484f58;
+      }
+      
+      .sse-account-fav {
+        border-color: rgba(255,215,0,0.3);
+      }
+      
+      .sse-account-header {
+        display: flex;
+        align-items: center;
+        padding: 10px 14px;
+        gap: 10px;
         cursor: pointer;
       }
       
-      .sso-enhancer-toggle-container input {
-        width: 16px;
-        height: 16px;
-        accent-color: #ff9900;
+      .sse-account-info {
+        flex: 1;
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
       }
       
-      .sso-enhancer-toggle-label {
-        font-size: 13px;
+      .sse-account-name {
+        font-weight: 600;
+        font-size: 14px;
+      }
+      
+      .sse-account-id {
+        font-size: 12px;
+        color: #8b949e;
+        font-family: 'SF Mono', Monaco, monospace;
+      }
+      
+      .sse-expand-btn {
+        background: none;
+        border: none;
+        color: #8b949e;
+        cursor: pointer;
+        padding: 4px 8px;
+        font-size: 10px;
+        transition: color 0.15s;
+      }
+      
+      .sse-expand-btn:hover {
+        color: #e6edf3;
+      }
+      
+      .sse-star {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 16px;
+        color: #6e7681;
+        padding: 2px;
+        transition: all 0.15s;
+      }
+      
+      .sse-star:hover {
+        transform: scale(1.2);
+      }
+      
+      .sse-star.active, .sse-star.combo {
         color: #ffd700;
       }
       
-      .sso-enhancer-stats {
-        display: flex;
-        gap: 16px;
-        padding: 10px 16px;
-        background: #0d1117;
-        font-size: 12px;
-        color: #8b949e;
-      }
-      
-      .sso-enhancer-stats strong {
-        color: #ff9900;
-        font-family: 'SF Mono', Monaco, monospace;
-      }
-      
-      .sso-enhancer-favorites {
-        max-height: 200px;
-        overflow-y: auto;
-      }
-      
-      .sso-enhancer-fav-item {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 8px 10px;
-        margin: 4px 0;
-        background: rgba(255,215,0,0.05);
-        border: 1px solid rgba(255,215,0,0.2);
-        border-radius: 6px;
-        transition: background 0.2s;
-      }
-      
-      .sso-enhancer-fav-item:hover {
-        background: rgba(255,215,0,0.1);
-      }
-      
-      .sso-enhancer-fav-info {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        min-width: 0;
-        flex: 1;
-      }
-      
-      .sso-enhancer-fav-account {
-        font-size: 12px;
-        font-weight: 500;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      
-      .sso-enhancer-fav-role {
-        font-size: 11px;
+      .sse-star.role {
         color: #58a6ff;
-        font-family: 'SF Mono', Monaco, monospace;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
       }
       
-      .sso-enhancer-fav-actions {
+      /* Roles */
+      .sse-roles {
+        border-top: 1px solid #21262d;
+        padding: 6px 14px;
+        background: #0d1117;
+      }
+      
+      .sse-role {
         display: flex;
         align-items: center;
-        gap: 4px;
-        flex-shrink: 0;
-      }
-      
-      .sso-enhancer-footer {
-        display: flex;
+        padding: 6px 8px;
         gap: 8px;
-        padding: 12px 16px;
-        border-top: 1px solid #21262d;
+        border-radius: 4px;
+        transition: background 0.1s;
       }
       
-      .sso-enhancer-progress-bar {
-        height: 4px;
+      .sse-role:hover {
         background: #21262d;
-        border-radius: 2px;
-        overflow: hidden;
-        margin-top: 8px;
       }
       
-      .sso-enhancer-progress-fill {
-        height: 100%;
-        background: #ff9900;
-        border-radius: 2px;
-        transition: width 0.1s;
-        width: 0%;
+      .sse-role-fav {
+        background: rgba(255,215,0,0.05);
       }
       
-      .sso-enhancer-progress-text {
-        font-size: 11px;
+      .sse-role-name {
+        flex: 1;
+        color: #58a6ff;
+        text-decoration: none;
+        font-size: 13px;
+        font-family: 'SF Mono', Monaco, monospace;
+      }
+      
+      .sse-role-name:hover {
+        text-decoration: underline;
+      }
+      
+      .sse-role-keys {
         color: #8b949e;
-        margin-top: 4px;
-        display: block;
+        text-decoration: none;
+        font-size: 14px;
+        opacity: 0.5;
+        transition: opacity 0.15s;
       }
       
-      /* Scrollbar styling */
-      .sso-enhancer-favorites::-webkit-scrollbar {
-        width: 6px;
+      .sse-role:hover .sse-role-keys {
+        opacity: 1;
       }
       
-      .sso-enhancer-favorites::-webkit-scrollbar-track {
-        background: #0d1117;
-        border-radius: 3px;
+      .sse-empty {
+        text-align: center;
+        padding: 40px;
+        color: #8b949e;
+        font-size: 14px;
       }
       
-      .sso-enhancer-favorites::-webkit-scrollbar-thumb {
-        background: #30363d;
-        border-radius: 3px;
-      }
-      
-      .sso-enhancer-favorites::-webkit-scrollbar-thumb:hover {
-        background: #484f58;
-      }
-      
-      /* Highlight matched text */
-      .sso-enhancer-highlight {
-        background: rgba(255,153,0,0.3);
-        border-radius: 2px;
+      /* Hide original AWS UI */
+      .sse-hidden {
+        display: none !important;
       }
     `;
-    
     document.head.appendChild(style);
-    document.body.appendChild(panel);
-    
-    return panel;
   }
 
-  // Set up event handlers
-  function setupEventHandlers() {
-    // Close button
-    document.getElementById('sso-enhancer-close').addEventListener('click', () => {
-      panel.classList.toggle('minimized');
-    });
+  // ========== INITIALIZATION ==========
+  function createApp() {
+    // Find the main content area and replace it
+    const mainContent = $('[data-testid="account-list"]') || 
+                        $('main') || 
+                        $('.awsui_content_hyvsj_1ukp9_145');
     
-    // Expand all (batched to avoid rate limiting)
-    document.getElementById('sso-enhancer-expand').addEventListener('click', async () => {
-      const btn = document.getElementById('sso-enhancer-expand');
-      const progress = document.getElementById('sso-enhancer-progress');
-      const fill = progress.querySelector('.sso-enhancer-progress-fill');
-      const text = progress.querySelector('.sso-enhancer-progress-text');
-      const warning = document.getElementById('sso-enhancer-rate-warning');
-      
-      btn.disabled = true;
-      btn.textContent = '⏳ Expanding...';
-      progress.style.display = 'block';
-      warning.style.display = 'block';
-      
-      await expandAccountsBatched((current, total) => {
-        const pct = (current / total) * 100;
-        fill.style.width = pct + '%';
-        text.textContent = `${current}/${total}`;
-      }, 3); // Pause every 3 accounts
-      
-      // After expanding, inject stars and apply filters
-      setTimeout(() => {
-        injectFavoriteStars();
-        applyFilters();
-        renderFavoritesList();
-        
-        btn.disabled = false;
-        btn.textContent = '📂 Expand All';
-        progress.style.display = 'none';
-        warning.style.display = 'none';
-        fill.style.width = '0%';
-      }, 200);
-    });
-    
-    // Collapse all
-    document.getElementById('sso-enhancer-collapse').addEventListener('click', () => {
-      collapseAllAccounts();
-    });
-    
-    // Account filter
-    document.getElementById('sso-enhancer-account-filter').addEventListener('input', (e) => {
-      accountFilter = e.target.value;
-      applyFilters();
-    });
-    
-    // Role filter
-    document.getElementById('sso-enhancer-role-filter').addEventListener('input', (e) => {
-      roleFilter = e.target.value;
-      applyFilters();
-    });
-    
-    // Favorites only toggle
-    document.getElementById('sso-enhancer-favorites-only').addEventListener('change', (e) => {
-      showFavoritesOnly = e.target.checked;
-      applyFilters();
-    });
-    
-    // Refresh button
-    document.getElementById('sso-enhancer-refresh').addEventListener('click', () => {
-      injectFavoriteStars();
-      applyFilters();
-      renderFavoritesList();
-    });
-    
-    // Export button
-    document.getElementById('sso-enhancer-export').addEventListener('click', () => {
-      const data = {
-        favorites: [...favorites],
-        exportedAt: new Date().toISOString(),
-        ssoUrl: window.location.href
-      };
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'aws-sso-favorites.json';
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-    
-    // Make panel draggable
-    let isDragging = false;
-    let dragOffset = { x: 0, y: 0 };
-    
-    const header = panel.querySelector('.sso-enhancer-header');
-    header.addEventListener('mousedown', (e) => {
-      if (e.target.classList.contains('sso-enhancer-close')) return;
-      isDragging = true;
-      dragOffset = {
-        x: e.clientX - panel.offsetLeft,
-        y: e.clientY - panel.offsetTop
-      };
-      panel.style.transition = 'none';
-    });
-    
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-      panel.style.left = (e.clientX - dragOffset.x) + 'px';
-      panel.style.top = (e.clientY - dragOffset.y) + 'px';
-      panel.style.right = 'auto';
-    });
-    
-    document.addEventListener('mouseup', () => {
-      isDragging = false;
-      panel.style.transition = '';
-    });
-    
-    // Watch for DOM changes to re-inject stars
-    const observer = new MutationObserver(() => {
-      setTimeout(() => {
-        injectFavoriteStars();
-        applyFilters();
-      }, 100);
-    });
-    
-    // Find the accounts container and observe it
-    const accountsContainer = document.querySelector('[data-testid="account-list"]') || 
-                              document.querySelector('#awsui-tabs-\\:r3f\\:-accounts-panel') ||
-                              document.querySelector('[class*="account"]')?.closest('[class*="container"]');
-    
-    if (accountsContainer) {
-      observer.observe(accountsContainer, { childList: true, subtree: true });
+    if (!mainContent) {
+      console.log('SSO Enhancer: Could not find main content area');
+      return;
     }
+    
+    // Hide original content
+    mainContent.classList.add('sse-hidden');
+    
+    // Create our app container
+    const app = document.createElement('div');
+    app.id = 'sso-enhancer-app';
+    mainContent.parentNode.insertBefore(app, mainContent);
+    
+    return app;
   }
 
-  // Toggle panel visibility
-  function toggle() {
-    if (panel) {
-      panel.classList.toggle('minimized');
-    }
-  }
-
-  // Initialize
   function init() {
-    panel = createPanel();
-    setupEventHandlers();
-    renderFavoritesList();
+    console.log('AWS SSO Enhancer initializing... ☁️');
     
-    // Initial stats
-    setTimeout(() => {
-      applyFilters();
-      injectFavoriteStars();
-    }, 500);
+    loadState();
+    injectStyles();
     
-    console.log('AWS SSO Enhancer initialized! ☁️');
+    // Wait for page to be ready
+    const checkReady = setInterval(() => {
+      const buttons = getAccountButtons();
+      if (buttons.length > 0) {
+        clearInterval(checkReady);
+        
+        const app = createApp();
+        if (app) {
+          refreshAccountData();
+          render();
+          console.log('AWS SSO Enhancer ready! ☁️');
+        }
+      }
+    }, 200);
+    
+    // Timeout after 10s
+    setTimeout(() => clearInterval(checkReady), 10000);
   }
 
-  // Run
+  // Start
   init();
-  
-  // Expose for toggle
-  window.__awsSsoEnhancer = { toggle };
+  window.__awsSsoEnhancer = { state, render, refreshAccountData };
 })();

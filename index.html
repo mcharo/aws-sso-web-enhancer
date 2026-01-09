@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AWS SSO Enhancer - Bookmarklet</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap');
+    
+    :root {
+      --bg: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border: #30363d;
+      --text: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent: #ff9900;
+      --accent-dim: #cc7a00;
+      --green: #238636;
+      --blue: #58a6ff;
+    }
+    
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+    
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 3rem 2rem;
+    }
+    
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+    
+    .logo {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+    }
+    
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, var(--text), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    
+    .tagline {
+      color: var(--text-secondary);
+      font-size: 1.1rem;
+    }
+    
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+    }
+    
+    h2 {
+      font-size: 1.25rem;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .bookmarklet-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+      padding: 2rem;
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      margin: 1.5rem 0;
+    }
+    
+    .bookmarklet-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 1rem 2rem;
+      background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+      color: #000;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.1rem;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(255, 153, 0, 0.3);
+      transition: all 0.2s;
+      cursor: grab;
+    }
+    
+    .bookmarklet-link:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(255, 153, 0, 0.4);
+    }
+    
+    .bookmarklet-link:active {
+      cursor: grabbing;
+    }
+    
+    .instructions {
+      color: var(--text-secondary);
+      text-align: center;
+    }
+    
+    ol {
+      margin: 1rem 0;
+      padding-left: 1.5rem;
+    }
+    
+    li {
+      margin: 0.75rem 0;
+      color: var(--text-secondary);
+    }
+    
+    li strong {
+      color: var(--text);
+    }
+    
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    
+    .feature {
+      background: var(--bg-tertiary);
+      padding: 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    
+    .feature-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    .feature h3 {
+      font-size: 0.95rem;
+      margin-bottom: 0.25rem;
+    }
+    
+    .feature p {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      background: var(--bg-tertiary);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      color: var(--blue);
+    }
+    
+    .code-block {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      margin: 1rem 0;
+    }
+    
+    .code-block code {
+      background: none;
+      padding: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+    }
+    
+    .copy-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .copy-btn:hover {
+      background: var(--border);
+    }
+    
+    .copy-btn.copied {
+      background: var(--green);
+      border-color: var(--green);
+    }
+    
+    footer {
+      text-align: center;
+      padding-top: 2rem;
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+    }
+    
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    
+    footer a:hover {
+      text-decoration: underline;
+    }
+    
+    .alt-install {
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+    
+    .alt-install summary {
+      cursor: pointer;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+    }
+    
+    .alt-install summary:hover {
+      color: var(--text);
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">⚡</div>
+      <h1>AWS SSO Enhancer</h1>
+      <p class="tagline">Filter, favorite, and turbocharge your AWS SSO account selection</p>
+    </header>
+    
+    <div class="card">
+      <h2>📥 Install Bookmarklet</h2>
+      <p>Drag this button to your bookmarks bar:</p>
+      
+      <div class="bookmarklet-container">
+        <a class="bookmarklet-link" id="bookmarklet" href="#">
+          ⚡ SSO Enhancer
+        </a>
+        <p class="instructions">
+          ↑ Drag this to your bookmarks bar, or right-click and "Bookmark Link"
+        </p>
+      </div>
+      
+      <details class="alt-install">
+        <summary>Alternative: Manual Installation</summary>
+        <ol>
+          <li>Create a new bookmark in your browser</li>
+          <li>Name it <strong>"SSO Enhancer"</strong></li>
+          <li>Copy the code below and paste it as the URL:</li>
+        </ol>
+        <div class="code-block">
+          <code id="bookmarklet-code"></code>
+        </div>
+        <button class="copy-btn" onclick="copyCode()">
+          📋 Copy Code
+        </button>
+      </details>
+    </div>
+    
+    <div class="card">
+      <h2>🚀 How to Use</h2>
+      <ol>
+        <li>Go to your <strong>AWS SSO portal</strong> (e.g., <code>yourcompany.awsapps.com/start</code>)</li>
+        <li>Make sure you're on the <strong>Accounts</strong> tab</li>
+        <li>Click the <strong>⚡ SSO Enhancer</strong> bookmarklet</li>
+        <li>Click <strong>"📂 Expand All"</strong> to load all account roles</li>
+        <li>Use the filters and favorites to find what you need!</li>
+      </ol>
+    </div>
+    
+    <div class="card">
+      <h2>✨ Features</h2>
+      <div class="features">
+        <div class="feature">
+          <div class="feature-icon">📂</div>
+          <h3>Expand All</h3>
+          <p>One-click expands all accounts to reveal permission sets</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🔍</div>
+          <h3>Filter Accounts</h3>
+          <p>Search by account name, ID, or email</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">🎯</div>
+          <h3>Filter Roles</h3>
+          <p>Search by permission set name</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">⭐</div>
+          <h3>Favorites</h3>
+          <p>Pin account+role combos for quick access</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">💾</div>
+          <h3>Persistent</h3>
+          <p>Favorites saved in localStorage</p>
+        </div>
+        <div class="feature">
+          <div class="feature-icon">📤</div>
+          <h3>Export</h3>
+          <p>Export favorites to JSON file</p>
+        </div>
+      </div>
+    </div>
+    
+    <footer>
+      <p>Works on <code>*.awsapps.com/start</code> AWS SSO portals</p>
+    </footer>
+  </div>
+  
+  <script>
+    // Load the enhancer script and create the bookmarklet
+    fetch('aws-sso-enhancer.js')
+      .then(r => r.text())
+      .then(code => {
+        // Minify (basic) - remove comments and extra whitespace
+        const minified = code
+          .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove block comments
+          .replace(/\/\/.*$/gm, '')           // Remove line comments
+          .replace(/\s+/g, ' ')               // Collapse whitespace
+          .replace(/\s*([{}();,:])\s*/g, '$1') // Remove space around punctuation
+          .trim();
+        
+        const bookmarkletCode = `javascript:(function(){${encodeURIComponent(minified)}})();`;
+        
+        document.getElementById('bookmarklet').href = bookmarkletCode;
+        document.getElementById('bookmarklet-code').textContent = bookmarkletCode;
+      })
+      .catch(() => {
+        // Fallback - embed the code directly
+        const fallbackCode = `javascript:(function(){const s=document.createElement('script');s.src='https://raw.githubusercontent.com/YOUR_REPO/aws-sso-enhancer.js';document.body.appendChild(s);})();`;
+        document.getElementById('bookmarklet').href = fallbackCode;
+        document.getElementById('bookmarklet-code').textContent = 'Error loading code. Please refresh the page.';
+      });
+    
+    function copyCode() {
+      const code = document.getElementById('bookmarklet-code').textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const btn = document.querySelector('.copy-btn');
+        btn.classList.add('copied');
+        btn.innerHTML = '✓ Copied!';
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = '📋 Copy Code';
+        }, 2000);
+      });
+    }
+  </script>
+</body>
+</html>

@@ -91,7 +91,7 @@
     });
   }
 
-  // Expand all accounts with delay to let DOM update
+  // Expand all accounts with delay to avoid rate limiting
   async function expandAllAccounts(progressCallback) {
     if (isExpanding) return;
     isExpanding = true;
@@ -100,14 +100,62 @@
     const unexpanded = Array.from(buttons).filter(b => b.getAttribute('aria-expanded') === 'false');
     
     let expanded = 0;
+    let delay = 150; // Start with 150ms delay
+    const maxDelay = 2000;
+    const minDelay = 100;
+    let consecutiveSuccess = 0;
+    
     for (const button of unexpanded) {
       button.click();
       expanded++;
       if (progressCallback) {
+        progressCallback(expanded, unexpanded.length, delay);
+      }
+      
+      // Wait and check for rate limiting
+      await new Promise(r => setTimeout(r, delay));
+      
+      // Adaptive delay - slow down if we're going too fast
+      // Speed up gradually after successful batches
+      if (expanded % 5 === 0) {
+        consecutiveSuccess++;
+        if (consecutiveSuccess > 2 && delay > minDelay) {
+          delay = Math.max(minDelay, delay - 25);
+        }
+      }
+    }
+    
+    isExpanding = false;
+    return expanded;
+  }
+  
+  // Expand accounts sequentially with delays to avoid rate limiting
+  async function expandAccountsBatched(progressCallback, batchSize = 3) {
+    if (isExpanding) return;
+    isExpanding = true;
+    
+    const buttons = getAccountButtons();
+    const unexpanded = Array.from(buttons).filter(b => b.getAttribute('aria-expanded') === 'false');
+    
+    let expanded = 0;
+    
+    for (let i = 0; i < unexpanded.length; i++) {
+      const button = unexpanded[i];
+      button.click();
+      expanded++;
+      
+      if (progressCallback) {
         progressCallback(expanded, unexpanded.length);
       }
-      // Small delay to let the DOM update and not overwhelm the page
-      await new Promise(r => setTimeout(r, 50));
+      
+      // Delay after each expansion - longer pause every few accounts
+      if ((i + 1) % batchSize === 0) {
+        // Longer pause every 3 accounts (batch boundary)
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        // Short delay between individual accounts
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
     
     isExpanding = false;
@@ -314,7 +362,7 @@
     panel.innerHTML = `
       <div class="sso-enhancer-header">
         <div class="sso-enhancer-title">
-          <span class="sso-enhancer-logo">⚡</span>
+          <span class="sso-enhancer-logo">☁️</span>
           <span>SSO Enhancer</span>
         </div>
         <button id="sso-enhancer-close" class="sso-enhancer-close">×</button>
@@ -322,11 +370,11 @@
       
       <div class="sso-enhancer-section">
         <div class="sso-enhancer-actions">
-          <button id="sso-enhancer-expand" class="sso-enhancer-btn sso-enhancer-btn-primary">
+          <button id="sso-enhancer-expand" class="sso-enhancer-btn sso-enhancer-btn-primary" title="Expand 5 at a time with pauses (safer)">
             📂 Expand All
           </button>
           <button id="sso-enhancer-collapse" class="sso-enhancer-btn">
-            📁 Collapse All
+            📁 Collapse
           </button>
         </div>
         <div id="sso-enhancer-progress" style="display: none;">
@@ -334,6 +382,9 @@
             <div class="sso-enhancer-progress-fill"></div>
           </div>
           <span class="sso-enhancer-progress-text">0/0</span>
+        </div>
+        <div id="sso-enhancer-rate-warning" style="display: none; margin-top: 8px; padding: 8px; background: rgba(255,100,100,0.1); border-radius: 4px; font-size: 11px; color: #ff9999;">
+          ⚠️ Going slow to avoid rate limits...
         </div>
       </div>
       
@@ -685,22 +736,24 @@
       panel.classList.toggle('minimized');
     });
     
-    // Expand all
+    // Expand all (batched to avoid rate limiting)
     document.getElementById('sso-enhancer-expand').addEventListener('click', async () => {
       const btn = document.getElementById('sso-enhancer-expand');
       const progress = document.getElementById('sso-enhancer-progress');
       const fill = progress.querySelector('.sso-enhancer-progress-fill');
       const text = progress.querySelector('.sso-enhancer-progress-text');
+      const warning = document.getElementById('sso-enhancer-rate-warning');
       
       btn.disabled = true;
       btn.textContent = '⏳ Expanding...';
       progress.style.display = 'block';
+      warning.style.display = 'block';
       
-      await expandAllAccounts((current, total) => {
+      await expandAccountsBatched((current, total) => {
         const pct = (current / total) * 100;
         fill.style.width = pct + '%';
         text.textContent = `${current}/${total}`;
-      });
+      }, 3); // Pause every 3 accounts
       
       // After expanding, inject stars and apply filters
       setTimeout(() => {
@@ -711,6 +764,7 @@
         btn.disabled = false;
         btn.textContent = '📂 Expand All';
         progress.style.display = 'none';
+        warning.style.display = 'none';
         fill.style.width = '0%';
       }, 200);
     });
@@ -825,7 +879,7 @@
       injectFavoriteStars();
     }, 500);
     
-    console.log('AWS SSO Enhancer initialized! ⚡');
+    console.log('AWS SSO Enhancer initialized! ☁️');
   }
 
   // Run

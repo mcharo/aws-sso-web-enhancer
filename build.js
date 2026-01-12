@@ -21,39 +21,57 @@ const minified = jsCode
   .replace(/(?<!:)\/\/.*$/gm, '')
   // Collapse whitespace
   .replace(/\s+/g, ' ')
-  // Remove space around operators/punctuation
-  .replace(/\s*([{}()\[\];,:<>=!&|?+\-*\/])\s*/g, '$1')
+  // Remove space around operators/punctuation (preserve space after } for template literals)
+  .replace(/\s*([{()\[\];,:<>=!&|?+\-*\/])\s*/g, '$1')
+  .replace(/\s*}/g, '}')
+  .replace(/}\s+(?=[a-zA-Z$_])/g, '} ')
   // Clean up any double spaces left
   .replace(/  +/g, ' ')
   .trim();
 
-// URL encode
-const encoded = encodeURIComponent(minified);
+// Helper to create variant
+function createVariant(code, { autoExpand = false, hideHeaders = false } = {}) {
+  let result = code;
+  
+  if (hideHeaders) {
+    result = result.replace('const HIDE_HEADERS=false', 'const HIDE_HEADERS=true');
+  }
+  
+  if (autoExpand) {
+    result = result.replace(
+      /console\.log\('AWS SSO Enhancer ready![^']*'\);/,
+      `console.log('AWS SSO Enhancer ready! ☁️');setTimeout(()=>{const btn=document.querySelector('#sse-expand-all');if(btn)btn.click();},500);`
+    );
+  }
+  
+  return `javascript:${encodeURIComponent(result)}`;
+}
 
-// Build bookmarklet (standard)
-const bookmarklet = `javascript:${encoded}`;
-
-// Build auto-expand version
-const autoExpandCode = minified.replace(
-  /console\.log\('AWS SSO Enhancer ready![^']*'\);/,
-  `console.log('AWS SSO Enhancer ready! ☁️');setTimeout(()=>{const btn=document.querySelector('#sse-expand-all');if(btn)btn.click();},500);`
-);
-const autoExpandEncoded = encodeURIComponent(autoExpandCode);
-const bookmarkletAutoExpand = `javascript:${autoExpandEncoded}`;
+// Build all 4 variants
+const variants = {
+  standard: createVariant(minified),
+  autoExpand: createVariant(minified, { autoExpand: true }),
+  hideHeaders: createVariant(minified, { hideHeaders: true }),
+  autoExpandHideHeaders: createVariant(minified, { autoExpand: true, hideHeaders: true }),
+};
 
 console.log(`Minified: ${jsCode.length} → ${minified.length} bytes`);
-console.log(`Bookmarklet size: ${bookmarklet.length} bytes`);
-console.log(`Auto-expand bookmarklet size: ${bookmarkletAutoExpand.length} bytes`);
+console.log(`Standard bookmarklet: ${variants.standard.length} bytes`);
+console.log(`Auto-expand bookmarklet: ${variants.autoExpand.length} bytes`);
+console.log(`Hide-headers bookmarklet: ${variants.hideHeaders.length} bytes`);
+console.log(`Auto-expand + hide-headers: ${variants.autoExpandHideHeaders.length} bytes`);
 
-if (bookmarklet.length > 65536) {
+if (variants.standard.length > 65536) {
   console.warn('⚠️  Warning: Bookmarklet is very large. Some browsers may not support it.');
 }
 
 // Read template and replace placeholders
 const template = fs.readFileSync(TEMPLATE_FILE, 'utf8');
 const output = template
-  .replace('@@BOOKMARKLET_CODE@@', bookmarklet)
-  .replace('@@BOOKMARKLET_CODE_AUTOEXPAND@@', bookmarkletAutoExpand);
+  .replace('@@BOOKMARKLET_STANDARD@@', variants.standard)
+  .replace('@@BOOKMARKLET_AUTOEXPAND@@', variants.autoExpand)
+  .replace('@@BOOKMARKLET_HIDEHEADERS@@', variants.hideHeaders)
+  .replace('@@BOOKMARKLET_AUTOEXPAND_HIDEHEADERS@@', variants.autoExpandHideHeaders);
 
 // Write output
 fs.writeFileSync(OUTPUT_FILE, output);

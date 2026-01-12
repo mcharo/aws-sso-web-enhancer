@@ -85,12 +85,17 @@
     }
     button:hover { background: #30363d; }
     button.copied { background: #238636; border-color: #238636; }
+    .options {
+      margin-top: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
     .option {
       display: flex;
       align-items: center;
       justify-content: center;
       gap: 0.5rem;
-      margin-top: 1.25rem;
       font-size: 0.85rem;
       color: #8b949e;
       cursor: pointer;
@@ -106,10 +111,16 @@
     <a class="bookmarklet" id="bookmarklet" href="#">☁️ SSO Enhancer</a>
     <div class="hint">↑ Drag to bookmarks bar</div>
     
-    <label class="option">
-      <input type="checkbox" id="auto-expand">
-      <span>Auto-expand accounts on load</span>
-    </label>
+    <div class="options">
+      <label class="option">
+        <input type="checkbox" id="auto-expand">
+        <span>Auto-expand accounts on load</span>
+      </label>
+      <label class="option">
+        <input type="checkbox" id="hide-headers">
+        <span>Hide AWS page headers</span>
+      </label>
+    </div>
     
     <details>
       <summary>Manual install</summary>
@@ -119,23 +130,31 @@
   </main>
   
   <script>
-    const CODE = `@@BOOKMARKLET_CODE@@`;
-    const CODE_AUTO = `@@BOOKMARKLET_CODE_AUTOEXPAND@@`;
-    const checkbox = document.getElementById('auto-expand');
+    const VARIANTS = {
+      '00': `@@BOOKMARKLET_STANDARD@@`,
+      '10': `@@BOOKMARKLET_AUTOEXPAND@@`,
+      '01': `@@BOOKMARKLET_HIDEHEADERS@@`,
+      '11': `@@BOOKMARKLET_AUTOEXPAND_HIDEHEADERS@@`
+    };
+    const autoExpand = document.getElementById('auto-expand');
+    const hideHeaders = document.getElementById('hide-headers');
     const bookmarklet = document.getElementById('bookmarklet');
     const codeEl = document.getElementById('code');
     
     function update() {
-      const code = checkbox.checked ? CODE_AUTO : CODE;
+      const key = (autoExpand.checked ? '1' : '0') + (hideHeaders.checked ? '1' : '0');
+      const code = VARIANTS[key];
       bookmarklet.href = code;
       codeEl.textContent = code;
     }
     
-    checkbox.addEventListener('change', update);
+    autoExpand.addEventListener('change', update);
+    hideHeaders.addEventListener('change', update);
     update();
     
     function copy() {
-      navigator.clipboard.writeText(checkbox.checked ? CODE_AUTO : CODE);
+      const key = (autoExpand.checked ? '1' : '0') + (hideHeaders.checked ? '1' : '0');
+      navigator.clipboard.writeText(VARIANTS[key]);
       const btn = document.querySelector('button');
       btn.classList.add('copied');
       btn.textContent = '✓ Copied';

@@ -9,6 +9,9 @@
     return;
   }
 
+  // ========== OPTIONS (modified by build) ==========
+  const HIDE_HEADERS = false;
+
   // ========== STATE ==========
   const STORAGE_KEY = 'awsSsoEnhancer_v2';
   const USAGE_KEY = 'awsSsoEnhancer_usage';
@@ -914,6 +917,14 @@
       .sse-hidden {
         display: none !important;
       }
+      
+      ${HIDE_HEADERS ? `
+      /* Hide AWS page headers/tabs */
+      [class*="awsui_tabs-header-with-divider"],
+      [class*="awsui_m-bottom-s"][class*="awsui_box_18wu0"] {
+        display: none !important;
+      }
+      ` : ''}
     `;
     document.head.appendChild(style);
   }
